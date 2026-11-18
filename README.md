@@ -31,9 +31,15 @@ brew install python-tk@3.14
 ```
 
 ### على ويندوز
-1. تأكد من تثبيت Python مع خيار **Add python.exe to PATH**.
-2. انقر مرتين على **`تشغيل.bat`**.
-3. من النافذة اختر **تنصيب المتطلبات** ثم **تشغيل البرنامج**.
+1. ثبّت Python 3.11+ من [python.org](https://www.python.org/downloads/) مع تفعيل **Add python.exe to PATH**.
+2. عطّل اختصارات المتجر إن ظهرت رسالة Microsoft Store:
+   - Settings → Apps → Advanced app settings → App execution aliases
+   - أوقف `python.exe` و`python3.exe`
+3. انقر مرتين على **`run.bat`** (الأفضل)، أو `تشغيل.bat`، أو من PowerShell:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run.ps1
+   ```
+4. من النافذة اختر **تنصيب المتطلبات** ثم **تشغيل البرنامج**.
 
 ملاحظة: المسح من السكنر (TWAIN) يعمل على **ويندوز فقط**. على الماك يمكنك تجربة الدخول والأرشيف ورفع الملفات.
 
