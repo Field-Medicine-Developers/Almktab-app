@@ -107,9 +107,11 @@ class ArchiveAddFrame(ctk.CTkFrame):
         scanner.pack(fill="x", padx=20, pady=(16, 8))
         head = ctk.CTkFrame(scanner, fg_color="transparent")
         head.pack(fill="x", padx=16, pady=(14, 6))
-        SectionTitle(head, "إعدادات السكنر", "TWAIN — ويندوز فقط للمسح المباشر").pack(
-            side="right", fill="x", expand=True
-        )
+        SectionTitle(
+            head,
+            "إعدادات السكنر",
+            "يفضّل أجهزة [WIA] — تعمل بدون twaindsm.dll",
+        ).pack(side="right", fill="x", expand=True)
         self.scanner_badge = StatusBadge(head, "غير مفحوص", "muted")
         self.scanner_badge.pack(side="left")
 
@@ -249,9 +251,10 @@ class ArchiveAddFrame(ctk.CTkFrame):
                 devices = twain_scanner.list_devices()
                 names = [d.name for d in devices]
                 preferred = twain_scanner.prefer_device_name(devices)
-                self.after(0, lambda: self._apply_devices(names, preferred, None))
+                self.after(0, lambda n=names, p=preferred: self._apply_devices(n, p, None))
             except Exception as exc:
-                self.after(0, lambda: self._apply_devices([], "", str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._apply_devices([], "", e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -281,11 +284,13 @@ class ArchiveAddFrame(ctk.CTkFrame):
         def worker():
             try:
                 data = self.api.get_injury(info)
-                self.after(0, lambda: self._apply_injury(data))
+                self.after(0, lambda d=data: self._apply_injury(d))
             except ApiError as exc:
-                self.after(0, lambda: self._injury_fail(exc.message))
+                err = exc.message
+                self.after(0, lambda e=err: self._injury_fail(e))
             except Exception as exc:
-                self.after(0, lambda: self._injury_fail(str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._injury_fail(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -344,9 +349,10 @@ class ArchiveAddFrame(ctk.CTkFrame):
                             is_image=True,
                         )
                     )
-                self.after(0, lambda: self._after_scan(prepared, None))
+                self.after(0, lambda items=prepared: self._after_scan(items, None))
             except Exception as exc:
-                self.after(0, lambda: self._after_scan([], str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._after_scan([], e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -547,11 +553,13 @@ class ArchiveAddFrame(ctk.CTkFrame):
         def worker():
             try:
                 result = self.api.add_archive_file(statistical, payload)
-                self.after(0, lambda: self._after_save(result, None))
+                self.after(0, lambda r=result: self._after_save(r, None))
             except ApiError as exc:
-                self.after(0, lambda: self._after_save(None, exc.message))
+                err = exc.message
+                self.after(0, lambda e=err: self._after_save(None, e))
             except Exception as exc:
-                self.after(0, lambda: self._after_save(None, str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._after_save(None, e))
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -131,11 +131,13 @@ class LoginFrame(ctk.CTkFrame):
                     permissions=str(data.get("permissions") or ""),
                 )
                 save_session(session)
-                self.after(0, lambda: self._done_ok(session))
+                self.after(0, lambda s=session: self._done_ok(s))
             except ApiError as exc:
-                self.after(0, lambda: self._done_err(exc.message))
+                err = exc.message
+                self.after(0, lambda e=err: self._done_err(e))
             except Exception as exc:
-                self.after(0, lambda: self._done_err(str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._done_err(e))
 
         threading.Thread(target=worker, daemon=True).start()
 

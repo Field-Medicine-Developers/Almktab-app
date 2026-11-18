@@ -243,11 +243,13 @@ class ArchiveListFrame(ctk.CTkFrame):
                 result = self.api.get_archive_files(
                     page, size, info, book_number, book_type
                 )
-                self.after(0, lambda: self._apply_result(result))
+                self.after(0, lambda r=result: self._apply_result(r))
             except ApiError as exc:
-                self.after(0, lambda: self._fail(exc.message))
+                err = exc.message
+                self.after(0, lambda e=err: self._fail(e))
             except Exception as exc:
-                self.after(0, lambda: self._fail(str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: self._fail(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -384,9 +386,11 @@ class ArchiveListFrame(ctk.CTkFrame):
                         lambda: self._after_edit(row, book_type, book_number, result),
                     )
                 except ApiError as exc:
-                    self.after(0, lambda: show_error("فشل التعديل", exc.message))
+                    err = exc.message
+                    self.after(0, lambda e=err: show_error("فشل التعديل", e))
                 except Exception as exc:
-                    self.after(0, lambda: show_error("فشل التعديل", str(exc)))
+                    err = str(exc)
+                    self.after(0, lambda e=err: show_error("فشل التعديل", e))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -423,9 +427,11 @@ class ArchiveListFrame(ctk.CTkFrame):
                 result = self.api.delete_archive_file(row.get("id"))
                 self.after(0, lambda: self._after_delete(row_id, result))
             except ApiError as exc:
-                self.after(0, lambda: show_error("فشل الحذف", exc.message))
+                err = exc.message
+                self.after(0, lambda e=err: show_error("فشل الحذف", e))
             except Exception as exc:
-                self.after(0, lambda: show_error("فشل الحذف", str(exc)))
+                err = str(exc)
+                self.after(0, lambda e=err: show_error("فشل الحذف", e))
 
         threading.Thread(target=worker, daemon=True).start()
 

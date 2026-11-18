@@ -1,36 +1,24 @@
-# Almktab launcher for Windows PowerShell
+# Almktab silent launcher for Windows PowerShell
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-function Find-Python {
-    $venvPy = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
-    if (Test-Path $venvPy) { return $venvPy }
-
-    foreach ($cmd in @("py", "python", "python3")) {
-        $found = Get-Command $cmd -ErrorAction SilentlyContinue
-        if ($found) {
-            if ($cmd -eq "py") { return "py" }
-            return $found.Source
-        }
-    }
-    return $null
-}
-
-$python = Find-Python
-if (-not $python) {
-    Add-Type -AssemblyName PresentationFramework
-    [System.Windows.MessageBox]::Show(
-        "Python غير مثبت أو غير موجود في PATH.`n`nثبّت Python 3.11+ من python.org وفعّل Add python.exe to PATH.`nثم عطّل App execution aliases للـ python من إعدادات ويندوز.",
-        "Almktab",
-        "OK",
-        "Error"
-    ) | Out-Null
-    exit 1
+$vbs = Join-Path $PSScriptRoot "run.vbs"
+if (Test-Path $vbs) {
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbs`"" -WindowStyle Hidden
+    exit 0
 }
 
 $setup = Join-Path $PSScriptRoot "setup_gui.py"
-if ($python -eq "py") {
-    & py -3 $setup
-} else {
-    & $python $setup
+$venvPyw = Join-Path $PSScriptRoot ".venv\Scripts\pythonw.exe"
+if (Test-Path $venvPyw) {
+    Start-Process -FilePath $venvPyw -ArgumentList "`"$setup`"" -WindowStyle Hidden
+    exit 0
 }
+
+$pythonw = Get-Command pythonw -ErrorAction SilentlyContinue
+if ($pythonw) {
+    Start-Process -FilePath $pythonw.Source -ArgumentList "`"$setup`"" -WindowStyle Hidden
+    exit 0
+}
+
+Start-Process -FilePath (Join-Path $PSScriptRoot "run.bat")

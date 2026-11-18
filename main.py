@@ -103,7 +103,23 @@ class AlmktabApp(ctk.CTk):
         self.destroy()
 
 
+def _hide_console_window() -> None:
+    """إخفاء نافذة CMD إن فُتح البرنامج من طرفية ويندوز."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+            ctypes.windll.kernel32.FreeConsole()
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _hide_console_window()
     app = AlmktabApp()
     app.mainloop()
 

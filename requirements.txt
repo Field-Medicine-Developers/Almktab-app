@@ -2,4 +2,5 @@ customtkinter>=5.2.2
 httpx>=0.27.0
 Pillow>=10.0.0
 pytwain>=2.3.0; platform_system=="Windows"
+pywin32>=306; platform_system=="Windows"
 pyinstaller>=6.0.0; platform_system=="Windows"
