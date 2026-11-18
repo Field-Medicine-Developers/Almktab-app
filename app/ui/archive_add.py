@@ -114,7 +114,7 @@ class ArchiveAddFrame(ctk.CTkFrame):
         SectionTitle(
             head,
             "إعدادات السكنر",
-            "يفضّل أجهزة [WIA] — تعمل بدون twaindsm.dll",
+            "للرزمة ADF: فعّل الخيار أدناه وفضّل جهاز [TWAIN] إن ظهر (Canon)",
         ).pack(side="right", fill="x", expand=True)
         self.scanner_badge = StatusBadge(head, "غير مفحوص", "muted")
         self.scanner_badge.pack(side="left")

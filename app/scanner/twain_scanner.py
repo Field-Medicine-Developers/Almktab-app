@@ -111,35 +111,19 @@ def scan(
 ) -> List[ScannedImage]:
     """
     مسح صفحات متعددة عند use_feeder=True (ADF مستمر حتى نفاد الورق).
-    show_ui يُفضّل False للدفعة المستمرة حتى لا يتوقف بعد ورقة واحدة.
+    لرزمة الأوراق: نفضّل TWAIN أولاً (مثل خدمة النظام)، ثم WIA بنمط إعادة الاتصال.
     """
     if not is_windows():
         raise ScannerError("المسح متاح على ويندوز فقط.")
 
     _warn_store_python()
     name = device_name or ""
-    prefer_wia = (not name) or name.startswith("[WIA]") or "wia" in name.lower()
-    # للمسح المستمر من ADF لا نفتح حوار صفحة واحدة
+    force_wia = name.startswith("[WIA]")
+    force_twain = name.startswith("[TWAIN]")
     ui = False if use_feeder else bool(show_ui)
-
     errors: List[str] = []
 
-    if prefer_wia or not name.startswith("[TWAIN]"):
-        try:
-            from app.scanner.wia_backend import scan_wia
-
-            return scan_wia(
-                device_name=name,
-                dpi=dpi,
-                use_feeder=use_feeder,
-                show_ui=ui,
-            )
-        except Exception as exc:
-            errors.append(f"WIA: {exc}")
-            if name.startswith("[WIA]"):
-                raise ScannerError(str(exc)) from exc
-
-    try:
+    def try_twain() -> List[ScannedImage]:
         ensure_twain_dsm()
         return _scan_twain(
             device_name=_strip_prefix(name),
@@ -147,19 +131,43 @@ def scan(
             use_feeder=use_feeder,
             show_ui=ui,
         )
-    except Exception as exc:
-        errors.append(f"TWAIN: {exc}")
 
-    # محاولة أخيرة WIA بدون واجهة لضمان الدفعة الكاملة
-    try:
+    def try_wia() -> List[ScannedImage]:
         from app.scanner.wia_backend import scan_wia
 
-        return scan_wia(dpi=dpi, use_feeder=use_feeder, show_ui=False)
-    except Exception as exc:
-        errors.append(f"WIA-batch: {exc}")
+        return scan_wia(
+            device_name=name,
+            dpi=dpi,
+            use_feeder=use_feeder,
+            show_ui=ui,
+        )
+
+    # ترتيب المحاولات حسب الجهاز والـ ADF
+    if force_wia:
+        order = [try_wia, try_twain]
+    elif force_twain or use_feeder:
+        # ADF: TWAIN أولاً (Canon DR يعمل عليه في النظام الحالي)
+        order = [try_twain, try_wia]
+    else:
+        order = [try_wia, try_twain]
+
+    for attempt in order:
+        try:
+            images = attempt()
+            if images:
+                return images
+        except Exception as exc:
+            errors.append(f"{attempt.__name__}: {exc}")
+            if force_wia and attempt is try_wia:
+                # إن اختير WIA صراحة نكمّل للمحاولة التالية بدل الإيقاف فوراً
+                continue
+            if force_twain and attempt is try_twain:
+                continue
 
     raise ScannerError(
-        "فشل المسح من كل الطرق المتاحة.\n- " + "\n- ".join(errors)
+        "فشل المسح من كل الطرق المتاحة.\n"
+        "للـ ADF: ضع الرزمة في المغذي، وفضّل جهاز [TWAIN] إن ظهر، أو USB وليس WSD.\n"
+        "- " + "\n- ".join(errors)
     )
 
 
@@ -348,29 +356,32 @@ def _scan_twain(
 
         source = source_manager.OpenSource(selected)
         _configure_source(twain, source, dpi=dpi, use_feeder=use_feeder)
-        # للدفعة المستمرة: بدون UI أفضل حتى لا يتوقف المصدر بعد صفحة
-        source.RequestAcquire(1 if show_ui and not use_feeder else 0, 0 if use_feeder else 1)
+
+        # ADF: بدون UI + غير نافذة مودال حتى يستمر السحب
+        if use_feeder:
+            source.RequestAcquire(0, 0)
+        else:
+            source.RequestAcquire(1 if show_ui else 0, 1 if show_ui else 0)
 
         index = 0
-        empty_streak = 0
         while index < 200:
             try:
                 result = source.XferImageNatively()
             except Exception:
                 break
             if not result:
-                empty_streak += 1
-                if empty_streak >= 2 or not use_feeder:
-                    break
-                continue
+                break
 
-            empty_streak = 0
             dib_handle = result[0] if isinstance(result, tuple) else result
             if not dib_handle:
                 break
             more = True
             if isinstance(result, tuple) and len(result) > 1:
-                more = bool(result[1])
+                # في pytwain: العنصر الثاني غالباً عدد المتبقي / مؤشر استمرار
+                more_flag = result[1]
+                more = bool(more_flag) if not isinstance(more_flag, bool) else more_flag
+                if isinstance(more_flag, int):
+                    more = more_flag != 0
 
             index += 1
             bmp_path = None
@@ -404,9 +415,12 @@ def _scan_twain(
 
             if not use_feeder:
                 break
-            if not more and index > 0:
-                # بعض التعريفات تعيد more=False بين الصفحات — نحاول صفحة إضافية
+            # مع ADF نستمر ما دام النقل يعيد صوراً؛ more=False لا يوقف فوراً
+            # لأن بعض تعريفات Canon تعيده بشكل غير موثوق بين الصفحات
+            if use_feeder:
                 continue
+            if not more:
+                break
 
         if not images:
             raise ScannerError("لم يتم استلام أي صورة من TWAIN.")
@@ -424,54 +438,62 @@ def _strip_prefix(name: str) -> str:
 
 
 def _configure_source(twain, source, dpi: int, use_feeder: bool) -> None:
-    for attempt in (
-        lambda: source.SetCapability(
-            twain.ICAP_PIXELTYPE, twain.TWTY_UINT16, twain.TWPT_RGB
-        ),
-        lambda: source.SetCapability("ICAP_PIXELTYPE", twain.TWPT_RGB),
-    ):
-        try:
-            attempt()
-            break
-        except Exception:
-            continue
-
-    for attempt in (
-        lambda: source.SetCapability(
-            twain.ICAP_XRESOLUTION, twain.TWTY_FIX32, float(dpi)
-        ),
-        lambda: source.SetCapability("ICAP_XRESOLUTION", float(dpi)),
-    ):
-        try:
-            attempt()
-            break
-        except Exception:
-            continue
-
-    for attempt in (
-        lambda: source.SetCapability(
-            twain.ICAP_YRESOLUTION, twain.TWTY_FIX32, float(dpi)
-        ),
-        lambda: source.SetCapability("ICAP_YRESOLUTION", float(dpi)),
-    ):
-        try:
-            attempt()
-            break
-        except Exception:
-            continue
-
-    if use_feeder:
-        for attempt in (
-            lambda: source.SetCapability(
-                twain.CAP_FEEDERENABLED, twain.TWTY_BOOL, True
-            ),
-            lambda: source.SetCapability("CAP_FEEDERENABLED", True),
-        ):
+    def _try(setters) -> None:
+        for setter in setters:
             try:
-                attempt()
-                break
+                setter()
+                return
             except Exception:
                 continue
+
+    _try(
+        (
+            lambda: source.SetCapability(
+                twain.ICAP_PIXELTYPE, twain.TWTY_UINT16, twain.TWPT_RGB
+            ),
+            lambda: source.SetCapability("ICAP_PIXELTYPE", twain.TWPT_RGB),
+        )
+    )
+    _try(
+        (
+            lambda: source.SetCapability(
+                twain.ICAP_XRESOLUTION, twain.TWTY_FIX32, float(dpi)
+            ),
+            lambda: source.SetCapability("ICAP_XRESOLUTION", float(dpi)),
+        )
+    )
+    _try(
+        (
+            lambda: source.SetCapability(
+                twain.ICAP_YRESOLUTION, twain.TWTY_FIX32, float(dpi)
+            ),
+            lambda: source.SetCapability("ICAP_YRESOLUTION", float(dpi)),
+        )
+    )
+
+    if use_feeder:
+        # مطابق تقريباً لإعدادات خدمة Alkadmat C# + AutoFeed + كل الصفحات
+        _try(
+            (
+                lambda: source.SetCapability(
+                    twain.CAP_FEEDERENABLED, twain.TWTY_BOOL, True
+                ),
+                lambda: source.SetCapability("CAP_FEEDERENABLED", True),
+            )
+        )
+        _try(
+            (
+                lambda: source.SetCapability(twain.CAP_AUTOFEED, twain.TWTY_BOOL, True),
+                lambda: source.SetCapability("CAP_AUTOFEED", True),
+            )
+        )
+        # -1 = كل الصفحات في المغذي
+        _try(
+            (
+                lambda: source.SetCapability(twain.CAP_XFERCOUNT, twain.TWTY_INT16, -1),
+                lambda: source.SetCapability("CAP_XFERCOUNT", -1),
+            )
+        )
 
 
 def _safe_destroy(obj) -> None:
