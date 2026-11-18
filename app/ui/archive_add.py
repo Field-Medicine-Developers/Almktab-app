@@ -92,17 +92,22 @@ class ArchiveAddFrame(ctk.CTkFrame):
 
         left = ctk.CTkFrame(inner, fg_color="transparent")
         left.pack(side="left", fill="y", pady=14)
-        GhostButton(left, "رجوع للقائمة", command=self._back, width=130).pack(
+        GhostButton(left, "رجوع للقائمة", command=self._back, width=120).pack(
             side="left", padx=4
         )
-        PrimaryButton(left, "رفع ملفات", command=self._pick_files, width=120).pack(
+        # زر حفظ ظاهر دائماً في الشريط العلوي
+        self.top_save_btn = PrimaryButton(
+            left, "حفظ / إرسال", command=self._save, width=140
+        )
+        self.top_save_btn.pack(side="left", padx=4)
+        PrimaryButton(left, "رفع ملفات", command=self._pick_files, width=110).pack(
             side="left", padx=4
         )
         self.scan_btn = AccentButton(
-            left, "مسح من السكنر", command=self._scan, width=140
+            left, "مسح من السكنر", command=self._scan, width=130
         )
         self.scan_btn.pack(side="left", padx=4)
-        GhostButton(left, "فحص السكنر", command=self._refresh_devices, width=110).pack(
+        GhostButton(left, "فحص السكنر", command=self._refresh_devices, width=100).pack(
             side="left", padx=4
         )
 
@@ -204,7 +209,53 @@ class ArchiveAddFrame(ctk.CTkFrame):
         self.stat_chip = InfoChip(chips, "الرقم العشوائي")
         self.stat_chip.pack(side="right", fill="x", expand=True, padx=4)
 
-        # الملفات
+        # شريط الحفظ مثبت في الأسفل أولاً حتى لا يُدفع خارج الشاشة
+        footer = ctk.CTkFrame(
+            self,
+            fg_color=T.PRIMARY,
+            corner_radius=0,
+            height=78,
+        )
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+
+        actions = ctk.CTkFrame(footer, fg_color="transparent")
+        actions.pack(fill="both", expand=True, padx=16, pady=12)
+
+        self.save_btn = ctk.CTkButton(
+            actions,
+            text="حفظ / إرسال للأرشيف",
+            command=self._save,
+            width=220,
+            height=46,
+            corner_radius=12,
+            fg_color="#FFFFFF",
+            hover_color="#E8F3F5",
+            text_color=T.PRIMARY,
+            font=T.font(15, "bold"),
+        )
+        self.save_btn.pack(side="right", padx=6)
+        self.send_btn = AccentButton(
+            actions, "إرسال", command=self._save, width=120
+        )
+        self.send_btn.pack(side="right", padx=6)
+
+        self.error_label = ctk.CTkLabel(
+            actions,
+            text="",
+            text_color="#FFD7D3",
+            font=T.font(12),
+            anchor="e",
+        )
+        self.error_label.pack(side="right", fill="x", expand=True, padx=12)
+        ctk.CTkLabel(
+            actions,
+            text="بعد المسح: راجع المستندات ثم اضغط حفظ / إرسال",
+            font=T.font(12),
+            text_color="#D7EBEF",
+        ).pack(side="left", padx=6)
+
+        # الملفات تملأ المساحة المتبقية فوق شريط الحفظ
         files_card = AppCard(self)
         files_card.pack(fill="both", expand=True, padx=20, pady=8)
 
@@ -223,38 +274,6 @@ class ArchiveAddFrame(ctk.CTkFrame):
         )
         self.files_scroll.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
-        footer = ctk.CTkFrame(
-            self,
-            fg_color=T.SURFACE,
-            corner_radius=14,
-            border_width=1,
-            border_color=T.BORDER,
-        )
-        footer.pack(fill="x", padx=20, pady=(4, 18))
-
-        actions = ctk.CTkFrame(footer, fg_color="transparent")
-        actions.pack(fill="x", padx=12, pady=12)
-
-        self.save_btn = PrimaryButton(
-            actions, "حفظ / إرسال", command=self._save, width=170
-        )
-        self.save_btn.pack(side="right", padx=6)
-        self.send_btn = AccentButton(
-            actions, "إرسال للأرشيف", command=self._save, width=160
-        )
-        self.send_btn.pack(side="right", padx=6)
-
-        self.error_label = ctk.CTkLabel(
-            actions, text="", text_color=T.DANGER, font=T.font(12), anchor="e"
-        )
-        self.error_label.pack(side="right", fill="x", expand=True, padx=12)
-        ctk.CTkLabel(
-            actions,
-            text="بعد اكتمال المسح: عبّئ البيانات ثم احفظ/أرسل",
-            font=T.font(11),
-            text_color=T.TEXT_MUTED,
-        ).pack(side="left", padx=6)
-
         self._render_files()
 
     def _back(self) -> None:
@@ -266,8 +285,14 @@ class ArchiveAddFrame(ctk.CTkFrame):
         state = "disabled" if busy else "normal"
         self.scan_btn.configure(state=state)
         self.lookup_btn.configure(state=state)
-        self.save_btn.configure(state=state, text=message or "حفظ / إرسال")
+        label = message or "حفظ / إرسال للأرشيف"
+        self.save_btn.configure(state=state, text=label)
         self.send_btn.configure(state=state)
+        if hasattr(self, "top_save_btn"):
+            self.top_save_btn.configure(
+                state=state,
+                text="حفظ / إرسال" if not message else message,
+            )
 
     def _refresh_devices(self) -> None:
         self.scanner_badge.set_status("فحص...", "warn")
@@ -660,21 +685,21 @@ class ArchiveAddFrame(ctk.CTkFrame):
     def _focus_save_area(self) -> None:
         """تمييز زر الحفظ/الإرسال بعد اكتمال المسح أو الرفع."""
         try:
-            self.save_btn.configure(fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER)
-            self.send_btn.configure(fg_color=T.PRIMARY, hover_color=T.PRIMARY_HOVER)
+            self.save_btn.configure(fg_color="#FFE08A", text_color=T.TEXT)
+            self.send_btn.configure(fg_color="#FFE08A", text_color=T.TEXT)
+            if hasattr(self, "top_save_btn"):
+                self.top_save_btn.configure(fg_color="#FFE08A", text_color=T.TEXT)
             self.save_btn.focus_set()
-            self.after(
-                2500,
-                lambda: self.save_btn.configure(
-                    fg_color=T.PRIMARY, hover_color=T.PRIMARY_HOVER
-                ),
-            )
-            self.after(
-                2500,
-                lambda: self.send_btn.configure(
-                    fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER
-                ),
-            )
+            self.after(3000, self._reset_save_button_style)
+        except Exception:
+            pass
+
+    def _reset_save_button_style(self) -> None:
+        try:
+            self.save_btn.configure(fg_color="#FFFFFF", text_color=T.PRIMARY)
+            self.send_btn.configure(fg_color=T.ACCENT, text_color="#FFFFFF")
+            if hasattr(self, "top_save_btn"):
+                self.top_save_btn.configure(fg_color=T.PRIMARY, text_color="#FFFFFF")
         except Exception:
             pass
 
