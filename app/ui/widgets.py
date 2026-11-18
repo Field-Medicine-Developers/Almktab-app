@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import tkinter as tk
+from io import BytesIO
 from tkinter import messagebox
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from app.ui import theme as T
 
@@ -22,6 +23,46 @@ def show_info(title: str, message: str) -> None:
 
 def ask_yes_no(title: str, message: str) -> bool:
     return bool(messagebox.askyesno(title, message))
+
+
+def make_document_thumbnail(
+    image_bytes: bytes,
+    width: int = 168,
+    height: int = 230,
+) -> Image.Image:
+    """معاينة مستند واضحة بنسبة عمودية مع خلفية ورقية وإطار."""
+    with Image.open(BytesIO(image_bytes)) as src:
+        src = ImageOps.exif_transpose(src)
+        if src.mode not in ("RGB", "L"):
+            src = src.convert("RGB")
+        elif src.mode == "L":
+            src = src.convert("RGB")
+
+        # ورقة بيضاء بحجم البطاقة
+        canvas = Image.new("RGB", (width, height), "#F4F7FA")
+        # هامش داخلي لإطار المستند
+        pad = 10
+        inner_w = width - pad * 2
+        inner_h = height - pad * 2 - 8
+        page = ImageOps.contain(src, (inner_w, inner_h), Image.Resampling.LANCZOS)
+
+        # ظل بسيط
+        shadow = Image.new("RGB", (page.width + 4, page.height + 4), "#D5DEE7")
+        sx = (width - shadow.width) // 2 + 1
+        sy = pad + 2
+        canvas.paste(shadow, (sx, sy))
+
+        px = (width - page.width) // 2
+        py = pad
+        canvas.paste(page, (px, py))
+
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle(
+            [px - 1, py - 1, px + page.width, py + page.height],
+            outline="#C5D0DA",
+            width=1,
+        )
+        return canvas
 
 
 class AppCard(ctk.CTkFrame):
@@ -281,32 +322,133 @@ class EditArchiveDialog(ctk.CTkToplevel):
 
 
 class ImagePreviewDialog(ctk.CTkToplevel):
-    def __init__(self, master, title: str, image_path_or_bytes, is_bytes: bool = False):
+    """عارض مستند واضح مع تكبير وتدوير."""
+
+    def __init__(
+        self,
+        master,
+        title: str,
+        image_path_or_bytes: Union[str, bytes],
+        is_bytes: bool = False,
+    ):
         super().__init__(master)
         self.title(title)
-        self.geometry("900x700")
+        self.geometry("980x780")
+        self.minsize(720, 560)
         self.configure(fg_color=T.BG)
-        self._photo = None
-
-        card = AppCard(self)
-        card.pack(fill="both", expand=True, padx=14, pady=14)
-
-        canvas = tk.Canvas(card, background="#10242B", highlightthickness=0)
-        canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        self._photos = []
+        self._scale = 1.0
+        self._rotation = 0
+        self._source: Optional[Image.Image] = None
 
         try:
             if is_bytes:
-                from io import BytesIO
-
                 img = Image.open(BytesIO(image_path_or_bytes))
             else:
                 img = Image.open(image_path_or_bytes)
-            img.thumbnail((1200, 1000), Image.Resampling.LANCZOS)
-            self._photo = ImageTk.PhotoImage(img)
-            canvas.create_image(20, 20, anchor="nw", image=self._photo)
+            img = ImageOps.exif_transpose(img)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            self._source = img
         except Exception as exc:
-            ctk.CTkLabel(card, text=f"تعذر عرض الصورة: {exc}").pack(pady=20)
+            ctk.CTkLabel(self, text=f"تعذر عرض المستند: {exc}").pack(pady=40)
+            PrimaryButton(self, "إغلاق", command=self.destroy, width=120).pack(pady=12)
+            self.transient(master)
+            self.grab_set()
+            return
 
-        PrimaryButton(self, "إغلاق", command=self.destroy, width=120).pack(pady=(0, 12))
+        toolbar = ctk.CTkFrame(self, fg_color=T.SURFACE, corner_radius=0)
+        toolbar.pack(fill="x")
+        GhostButton(toolbar, "تكبير +", command=self._zoom_in, width=90).pack(
+            side="right", padx=6, pady=10
+        )
+        GhostButton(toolbar, "تصغير −", command=self._zoom_out, width=90).pack(
+            side="right", padx=6, pady=10
+        )
+        GhostButton(toolbar, "تدوير", command=self._rotate, width=90).pack(
+            side="right", padx=6, pady=10
+        )
+        GhostButton(toolbar, "ملاءمة", command=self._fit, width=90).pack(
+            side="right", padx=6, pady=10
+        )
+        PrimaryButton(toolbar, "إغلاق", command=self.destroy, width=100).pack(
+            side="left", padx=10, pady=10
+        )
+        ctk.CTkLabel(
+            toolbar,
+            text=title,
+            font=T.font(14, "bold"),
+            text_color=T.TEXT,
+        ).pack(side="left", padx=8)
+
+        wrap = AppCard(self)
+        wrap.pack(fill="both", expand=True, padx=14, pady=14)
+
+        self.canvas = tk.Canvas(
+            wrap,
+            background="#E8EEF2",
+            highlightthickness=0,
+        )
+        yscroll = tk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        xscroll = tk.Scrollbar(wrap, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        yscroll.pack(side="left", fill="y")
+        xscroll.pack(side="bottom", fill="x")
+        self.canvas.pack(side="right", fill="both", expand=True, padx=8, pady=8)
+
+        self.canvas.bind("<Configure>", lambda _e: self._render())
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self.after(80, self._fit)
+
         self.transient(master)
         self.grab_set()
+
+    def _on_wheel(self, event) -> None:
+        if event.delta > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+
+    def _zoom_in(self) -> None:
+        self._scale = min(4.0, self._scale + 0.15)
+        self._render()
+
+    def _zoom_out(self) -> None:
+        self._scale = max(0.25, self._scale - 0.15)
+        self._render()
+
+    def _rotate(self) -> None:
+        self._rotation = (self._rotation + 90) % 360
+        self._render()
+
+    def _fit(self) -> None:
+        if self._source is None:
+            return
+        self.update_idletasks()
+        cw = max(self.canvas.winfo_width() - 40, 200)
+        ch = max(self.canvas.winfo_height() - 40, 200)
+        img = self._source.rotate(-self._rotation, expand=True)
+        sw, sh = img.size
+        self._scale = min(cw / sw, ch / sh, 1.5)
+        self._render()
+
+    def _render(self) -> None:
+        if self._source is None:
+            return
+        img = self._source.rotate(-self._rotation, expand=True)
+        w = max(1, int(img.width * self._scale))
+        h = max(1, int(img.height * self._scale))
+        resized = img.resize((w, h), Image.Resampling.LANCZOS)
+
+        # خلفية ورق مع هامش
+        paper_w, paper_h = w + 48, h + 48
+        paper = Image.new("RGB", (paper_w, paper_h), "#FFFFFF")
+        paper.paste(resized, (24, 24))
+        draw = ImageDraw.Draw(paper)
+        draw.rectangle([12, 12, paper_w - 13, paper_h - 13], outline="#C9D5DE", width=1)
+
+        photo = ImageTk.PhotoImage(paper)
+        self._photos = [photo]
+        self.canvas.delete("all")
+        self.canvas.create_image(20, 20, anchor="nw", image=photo)
+        self.canvas.configure(scrollregion=(0, 0, paper_w + 40, paper_h + 40))

@@ -1,4 +1,4 @@
-"""مسح عبر WIA المدمج في ويندوز — لا يحتاج twaindsm.dll."""
+"""مسح عبر WIA المدمج في ويندوز — دعم ADF لعدة صفحات متتالية."""
 
 from __future__ import annotations
 
@@ -19,6 +19,25 @@ WIA_FORMAT_BMP = "{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}"
 WIA_HORIZONTAL_RESOLUTION = "Horizontal Resolution"
 WIA_VERTICAL_RESOLUTION = "Vertical Resolution"
 WIA_CURRENT_INTENT = "Current Intent"
+
+# Document Handling Select
+WIA_FEEDER = 0x001
+WIA_FLATBED = 0x002
+WIA_DUPLEX = 0x004
+WIA_FRONT_ONLY = 0x020
+WIA_NEXT_PAGE = 0x080
+
+# Document Handling Status
+WIA_FEED_READY = 0x01
+
+# أخطاء شائعة لانتهاء الورق / الإلغاء
+PAPER_EMPTY_CODES = {
+    "0x80210003",  # WIA_ERROR_PAPER_EMPTY
+    "0x80210002",  # WIA_ERROR_PAPER_JAM (نتوقف أيضاً)
+    "0x80210001",  # WIA_ERROR_COVER_OPEN
+    "0x80210006",  # WIA_ERROR_PAPER_PROBLEM
+    "0x80210064",  # user cancelled
+}
 
 
 def _dispatch(prog_id: str):
@@ -60,11 +79,36 @@ def scan_wia(
     device_name: Optional[str] = None,
     dpi: int = 300,
     use_feeder: bool = True,
-    show_ui: bool = True,
+    show_ui: bool = False,
 ) -> List[ScannedImage]:
-    if show_ui:
-        return _scan_with_common_dialog()
+    """
+    مسح مستمر:
+    - use_feeder=True: يسحب كل الأوراق من ADF حتى نفاد الدرج
+    - use_feeder=False: صفحة واحدة (اللوح الزجاجي أو ورقة واحدة)
+    """
+    info = _resolve_device_info(device_name)
+    device = info.Connect()
+    if int(device.Items.Count) < 1:
+        raise ScannerError("السكنر لا يوفّر عنصر مسح عبر WIA.")
 
+    _configure_document_handling(device, use_feeder=use_feeder)
+    item = device.Items[1]
+    _set_item_dpi(item, dpi)
+
+    if use_feeder:
+        images = _scan_feeder_continuous(device, item, dpi=dpi, show_ui=show_ui)
+    else:
+        images = _scan_single_page(device, item, dpi=dpi, show_ui=show_ui)
+
+    if not images:
+        raise ScannerError(
+            "لم يتم استلام أي صورة.\n"
+            "ضع الأوراق في وحدة التغذية (ADF) وتأكد أن خيار «التغذية ADF» مفعّل."
+        )
+    return images
+
+
+def _resolve_device_info(device_name: Optional[str]):
     devices = list_wia_devices()
     if not devices:
         raise ScannerError(
@@ -86,6 +130,7 @@ def scan_wia(
         if (_prop(candidate, "Name") or "") == raw_name:
             info = candidate
             break
+
     if info is None:
         for index in range(1, int(manager.DeviceInfos.Count) + 1):
             candidate = manager.DeviceInfos(index)
@@ -95,30 +140,80 @@ def scan_wia(
                     break
             except Exception:
                 continue
+
     if info is None:
         raise ScannerError("تعذر الاتصال بالسكنر عبر WIA.")
+    return info
 
-    device = info.Connect()
-    if device.Items.Count < 1:
-        raise ScannerError("السكنر لا يوفّر عنصر مسح عبر WIA.")
 
-    item = device.Items[1]
-    _set_item_dpi(item, dpi)
-    _try_set_feeder(device, use_feeder)
-
-    images: List[ScannedImage] = []
-    page = 0
-    while True:
-        page += 1
-        try:
-            image = item.Transfer(WIA_FORMAT_JPEG)
-        except Exception:
-            try:
-                image = item.Transfer(WIA_FORMAT_BMP)
-            except Exception as exc:
-                if page == 1:
-                    raise ScannerError(f"فشل نقل الصورة من WIA: {exc}") from exc
+def _configure_document_handling(device, use_feeder: bool) -> None:
+    if use_feeder:
+        # FEEDER + FRONT_ONLY شائع لـ ADF أحادي الوجه
+        for value in (
+            WIA_FEEDER | WIA_FRONT_ONLY,
+            WIA_FEEDER,
+            1,
+        ):
+            if _set_prop(device, "Document Handling Select", value):
                 break
+        _set_prop(device, "Pages", 0)  # ALL_PAGES إن وُجد
+        _set_prop(device, "Sheet Feeder Registration", 0)
+    else:
+        for value in (WIA_FLATBED, 2):
+            if _set_prop(device, "Document Handling Select", value):
+                break
+        _set_prop(device, "Pages", 1)
+
+
+def _scan_feeder_continuous(device, item, dpi: int, show_ui: bool) -> List[ScannedImage]:
+    """يسحب الصفحات واحدة تلو الأخرى حتى يفرغ ADF."""
+    images: List[ScannedImage] = []
+    dialog = None
+    if show_ui:
+        try:
+            dialog = _dispatch("WIA.CommonDialog")
+        except Exception:
+            dialog = None
+
+    max_pages = 200
+    for page in range(1, max_pages + 1):
+        # إن لم يعد هناك ورق في المغذي — توقف بهدوء بعد أول صفحة ناجحة
+        if page > 1 and not _feeder_has_paper(device):
+            break
+
+        try:
+            item = device.Items[1]
+            _set_item_dpi(item, dpi)
+            # بعض الأجهزة تحتاج إعادة تفعيل NEXT_PAGE بين الصفحات
+            if page > 1:
+                current = _get_prop_int(device, "Document Handling Select")
+                if current is not None:
+                    _set_prop(device, "Document Handling Select", current | WIA_NEXT_PAGE)
+        except Exception:
+            if page == 1:
+                raise
+            break
+
+        try:
+            if dialog is not None and page == 1 and show_ui:
+                # واجهة اختيار/معاينة لأول صفحة فقط ثم نستمر تلقائياً
+                image = dialog.ShowTransfer(item, WIA_FORMAT_JPEG, False)
+            else:
+                image = _transfer_image(item)
+        except Exception as exc:
+            if _is_paper_empty(exc):
+                break
+            if page == 1:
+                # إن فشلت الدفعة الصامتة مع واجهة، لا نرجع لصفحة واحدة فقط
+                raise ScannerError(
+                    "فشل بدء المسح المستمر من ADF.\n"
+                    "ضع رزمة الأوراق في المغذي وتأكد أن السكنر جاهز.\n"
+                    f"التفاصيل: {exc}"
+                ) from exc
+            break
+
+        if image is None:
+            break
 
         data = _wia_image_to_jpeg_bytes(image)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -129,56 +224,85 @@ def scan_wia(
                 file_name=f"wia-{stamp}-{page}.jpg",
             )
         )
-        if not use_feeder:
-            break
-        try:
-            item = device.Items[1]
-            _set_item_dpi(item, dpi)
-        except Exception:
-            break
-        if page >= 50:
-            break
 
-    if not images:
-        raise ScannerError("لم يتم استلام أي صورة من WIA.")
     return images
 
 
-def _scan_with_common_dialog() -> List[ScannedImage]:
-    dialog = _dispatch("WIA.CommonDialog")
-    images: List[ScannedImage] = []
+def _scan_single_page(device, item, dpi: int, show_ui: bool) -> List[ScannedImage]:
+    _set_item_dpi(item, dpi)
     try:
-        image = dialog.ShowAcquireImage(
-            WIA_DEVICE_SCANNER,
-            WIA_INTENT_COLOR,
-            0,
-            WIA_FORMAT_JPEG,
-            False,
-            True,
-            False,
-        )
+        if show_ui:
+            dialog = _dispatch("WIA.CommonDialog")
+            image = dialog.ShowTransfer(item, WIA_FORMAT_JPEG, False)
+        else:
+            image = _transfer_image(item)
     except Exception as exc:
-        message = str(exc)
-        if "cancel" in message.lower() or "0x80210064" in message.lower():
+        if _is_cancelled(exc):
             raise ScannerError("تم إلغاء المسح.") from exc
-        raise ScannerError(
-            "تعذر فتح حوار المسح. تأكد أن السكنر متصل ويعمل في برامج أخرى.\n"
-            f"التفاصيل: {exc}"
-        ) from exc
+        raise ScannerError(f"فشل مسح الصفحة: {exc}") from exc
 
     if image is None:
-        raise ScannerError("لم يتم استلام أي صورة من حوار المسح.")
-
-    data = _wia_image_to_jpeg_bytes(image)
+        return []
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    images.append(
+    return [
         ScannedImage(
-            data=data,
+            data=_wia_image_to_jpeg_bytes(image),
             mime_type="image/jpeg",
             file_name=f"wia-{stamp}-1.jpg",
         )
-    )
-    return images
+    ]
+
+
+def _transfer_image(item):
+    try:
+        return item.Transfer(WIA_FORMAT_JPEG)
+    except Exception:
+        return item.Transfer(WIA_FORMAT_BMP)
+
+
+def _feeder_has_paper(device) -> bool:
+    status = _get_prop_int(device, "Document Handling Status")
+    if status is None:
+        # إن لم تُعرف الحالة نفترض احتمال وجود ورق ونترك Transfer يقرر
+        return True
+    return bool(status & WIA_FEED_READY)
+
+
+def _get_prop_int(obj, name: str) -> Optional[int]:
+    try:
+        return int(obj.Properties(name).Value)
+    except Exception:
+        return None
+
+
+def _set_prop(obj, name: str, value) -> bool:
+    try:
+        obj.Properties(name).Value = value
+        return True
+    except Exception:
+        return False
+
+
+def _is_paper_empty(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "empty" in text or "no paper" in text or "out of paper" in text:
+        return True
+    for code in PAPER_EMPTY_CODES:
+        if code.lower() in text:
+            return True
+    # winerror / hresult
+    hr = getattr(exc, "hresult", None) or getattr(exc, "args", [None])[0]
+    try:
+        if int(hr) in (-2145320957, -2145320958, -2145320955):  # paper empty / jam-ish
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_cancelled(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "cancel" in text or "0x80210064" in text
 
 
 def _wia_image_to_jpeg_bytes(image) -> bytes:
@@ -227,13 +351,3 @@ def _set_item_dpi(item, dpi: int) -> None:
         item.Properties(WIA_CURRENT_INTENT).Value = WIA_INTENT_COLOR
     except Exception:
         pass
-
-
-def _try_set_feeder(device, use_feeder: bool) -> None:
-    if not use_feeder:
-        return
-    for name in ("Document Handling Select", "Feeder", "Sheet Feeder"):
-        try:
-            device.Properties(name).Value = 1
-        except Exception:
-            pass

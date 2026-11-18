@@ -104,14 +104,20 @@ def scan(
     device_name: Optional[str] = None,
     dpi: int = 300,
     use_feeder: bool = True,
-    show_ui: bool = True,
+    show_ui: bool = False,
 ) -> List[ScannedImage]:
+    """
+    مسح صفحات متعددة عند use_feeder=True (ADF مستمر حتى نفاد الورق).
+    show_ui يُفضّل False للدفعة المستمرة حتى لا يتوقف بعد ورقة واحدة.
+    """
     if not is_windows():
         raise ScannerError("المسح متاح على ويندوز فقط.")
 
     _warn_store_python()
     name = device_name or ""
     prefer_wia = (not name) or name.startswith("[WIA]") or "wia" in name.lower()
+    # للمسح المستمر من ADF لا نفتح حوار صفحة واحدة
+    ui = False if use_feeder else bool(show_ui)
 
     errors: List[str] = []
 
@@ -120,14 +126,13 @@ def scan(
             from app.scanner.wia_backend import scan_wia
 
             return scan_wia(
-                device_name=name if name.startswith("[WIA]") else name,
+                device_name=name,
                 dpi=dpi,
                 use_feeder=use_feeder,
-                show_ui=True if not name else show_ui,
+                show_ui=ui,
             )
         except Exception as exc:
             errors.append(f"WIA: {exc}")
-            # إذا اختار المستخدم WIA صراحة لا نكمل إلا إذا فشل
             if name.startswith("[WIA]"):
                 raise ScannerError(str(exc)) from exc
 
@@ -137,18 +142,18 @@ def scan(
             device_name=_strip_prefix(name),
             dpi=dpi,
             use_feeder=use_feeder,
-            show_ui=show_ui,
+            show_ui=ui,
         )
     except Exception as exc:
         errors.append(f"TWAIN: {exc}")
 
-    # محاولة أخيرة: حوار WIA حتى لو اختير جهاز TWAIN
+    # محاولة أخيرة WIA بدون واجهة لضمان الدفعة الكاملة
     try:
         from app.scanner.wia_backend import scan_wia
 
-        return scan_wia(dpi=dpi, use_feeder=use_feeder, show_ui=True)
+        return scan_wia(dpi=dpi, use_feeder=use_feeder, show_ui=False)
     except Exception as exc:
-        errors.append(f"WIA-dialog: {exc}")
+        errors.append(f"WIA-batch: {exc}")
 
     raise ScannerError(
         "فشل المسح من كل الطرق المتاحة.\n- " + "\n- ".join(errors)
@@ -321,17 +326,23 @@ def _scan_twain(
 
         source = source_manager.OpenSource(selected)
         _configure_source(twain, source, dpi=dpi, use_feeder=use_feeder)
-        source.RequestAcquire(1 if show_ui else 0, 1)
+        # للدفعة المستمرة: بدون UI أفضل حتى لا يتوقف المصدر بعد صفحة
+        source.RequestAcquire(1 if show_ui and not use_feeder else 0, 0 if use_feeder else 1)
 
         index = 0
-        while True:
+        empty_streak = 0
+        while index < 200:
             try:
                 result = source.XferImageNatively()
             except Exception:
                 break
             if not result:
-                break
+                empty_streak += 1
+                if empty_streak >= 2 or not use_feeder:
+                    break
+                continue
 
+            empty_streak = 0
             dib_handle = result[0] if isinstance(result, tuple) else result
             if not dib_handle:
                 break
@@ -369,8 +380,11 @@ def _scan_twain(
                     except OSError:
                         pass
 
-            if not use_feeder or not more:
+            if not use_feeder:
                 break
+            if not more and index > 0:
+                # بعض التعريفات تعيد more=False بين الصفحات — نحاول صفحة إضافية
+                continue
 
         if not images:
             raise ScannerError("لم يتم استلام أي صورة من TWAIN.")

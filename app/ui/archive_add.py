@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
 from typing import Callable, List, Optional
 
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import ImageTk
 from tkinter import filedialog
 
 from app.api.client import ApiClient, ApiError, ArchiveFileItem
@@ -21,11 +20,14 @@ from app.ui.widgets import (
     AppCard,
     DangerButton,
     GhostButton,
+    ImagePreviewDialog,
     InfoChip,
     LabeledEntry,
     PrimaryButton,
     SectionTitle,
     StatusBadge,
+    ask_yes_no,
+    make_document_thumbnail,
     show_error,
     show_info,
 )
@@ -41,6 +43,8 @@ class PendingFile:
     book_type: str = ""
     book_number: str = ""
     preview: Optional[ImageTk.PhotoImage] = field(default=None, repr=False)
+    type_entry: object = field(default=None, repr=False)
+    number_entry: object = field(default=None, repr=False)
 
 
 class ArchiveAddFrame(ctk.CTkFrame):
@@ -156,7 +160,7 @@ class ArchiveAddFrame(ctk.CTkFrame):
 
         ctk.CTkCheckBox(
             row,
-            text="التغذية ADF",
+            text="ADF مستمر (كل الأوراق)",
             variable=self.feeder_var,
             font=T.font(12),
             text_color=T.TEXT,
@@ -219,16 +223,37 @@ class ArchiveAddFrame(ctk.CTkFrame):
         )
         self.files_scroll.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.pack(fill="x", padx=20, pady=(4, 18))
-        self.save_btn = PrimaryButton(
-            footer, "حفظ الأرشيف", command=self._save, width=180
+        footer = ctk.CTkFrame(
+            self,
+            fg_color=T.SURFACE,
+            corner_radius=14,
+            border_width=1,
+            border_color=T.BORDER,
         )
-        self.save_btn.pack(side="right")
+        footer.pack(fill="x", padx=20, pady=(4, 18))
+
+        actions = ctk.CTkFrame(footer, fg_color="transparent")
+        actions.pack(fill="x", padx=12, pady=12)
+
+        self.save_btn = PrimaryButton(
+            actions, "حفظ / إرسال", command=self._save, width=170
+        )
+        self.save_btn.pack(side="right", padx=6)
+        self.send_btn = AccentButton(
+            actions, "إرسال للأرشيف", command=self._save, width=160
+        )
+        self.send_btn.pack(side="right", padx=6)
+
         self.error_label = ctk.CTkLabel(
-            footer, text="", text_color=T.DANGER, font=T.font(12), anchor="e"
+            actions, text="", text_color=T.DANGER, font=T.font(12), anchor="e"
         )
         self.error_label.pack(side="right", fill="x", expand=True, padx=12)
+        ctk.CTkLabel(
+            actions,
+            text="بعد اكتمال المسح: عبّئ البيانات ثم احفظ/أرسل",
+            font=T.font(11),
+            text_color=T.TEXT_MUTED,
+        ).pack(side="left", padx=6)
 
         self._render_files()
 
@@ -241,7 +266,8 @@ class ArchiveAddFrame(ctk.CTkFrame):
         state = "disabled" if busy else "normal"
         self.scan_btn.configure(state=state)
         self.lookup_btn.configure(state=state)
-        self.save_btn.configure(state=state, text=message or "حفظ الأرشيف")
+        self.save_btn.configure(state=state, text=message or "حفظ / إرسال")
+        self.send_btn.configure(state=state)
 
     def _refresh_devices(self) -> None:
         self.scanner_badge.set_status("فحص...", "warn")
@@ -326,7 +352,7 @@ class ArchiveAddFrame(ctk.CTkFrame):
             return
 
         self._set_busy(True, "جاري المسح...")
-        self.scan_btn.configure(text="جاري المسح...")
+        self.scan_btn.configure(text="جاري المسح المستمر...")
         dpi = int(self.dpi_var.get() or 300)
         use_feeder = bool(self.feeder_var.get())
 
@@ -336,7 +362,8 @@ class ArchiveAddFrame(ctk.CTkFrame):
                     device_name=device,
                     dpi=dpi,
                     use_feeder=use_feeder,
-                    show_ui=True,
+                    # False مع ADF = دفعة كاملة حتى نفاد الورق
+                    show_ui=not use_feeder,
                 )
                 prepared = []
                 for image in images:
@@ -363,8 +390,35 @@ class ArchiveAddFrame(ctk.CTkFrame):
             show_error("فشل المسح", error)
             return
         self.files.extend(items)
+        # تعبئة أولية مساعدة للأعداد الفارغة
+        for offset, item in enumerate(items):
+            if not item.book_number.strip():
+                item.book_number = str(len(self.files) - len(items) + offset + 1)
+            if not item.book_type.strip():
+                item.book_type = "مستند"
         self._render_files()
-        show_info("تم المسح", f"تمت إضافة {len(items)} صورة")
+        self._focus_save_area()
+
+        ready_to_send = bool((self.injury_statistical_number or "").strip())
+        message = (
+            f"اكتمل المسح: {len(items)} صفحة.\n\n"
+            "راجع المستندات وعدل نوع الكتاب/العدد إن لزم.\n"
+        )
+        if ready_to_send:
+            message += "هل تريد الحفظ/الإرسال الآن؟"
+            if ask_yes_no("اكتمل المسح — حفظ / إرسال", message):
+                self._save()
+                return
+            show_info(
+                "تم المسح",
+                "يمكنك الضغط على «حفظ / إرسال» أو «إرسال للأرشيف» متى ما جاهز.",
+            )
+        else:
+            show_info(
+                "اكتمل المسح",
+                message
+                + "ابحث عن الجريح أولاً ثم اضغط «حفظ / إرسال» أو «إرسال للأرشيف».",
+            )
 
     def _pick_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -394,68 +448,182 @@ class ArchiveAddFrame(ctk.CTkFrame):
                 show_error("ملف غير صالح", f"{path.name}: {exc}")
         if added:
             self._render_files()
+            self._focus_save_area()
+            if ask_yes_no(
+                "اكتمل الرفع",
+                f"تمت إضافة {added} ملف.\nهل تريد الحفظ/الإرسال الآن؟",
+            ):
+                self._save()
 
     def _render_files(self) -> None:
         for child in self.files_scroll.winfo_children():
             child.destroy()
 
-        self.files_count.set_status(f"{len(self.files)} ملف", "info" if self.files else "muted")
+        self.files_count.set_status(
+            f"{len(self.files)} مستند", "info" if self.files else "muted"
+        )
         if not self.files:
             empty = ctk.CTkFrame(self.files_scroll, fg_color="transparent")
             empty.pack(fill="x", pady=40)
             ctk.CTkLabel(
                 empty,
-                text="لا توجد ملفات بعد",
+                text="لا توجد مستندات بعد",
                 font=T.font(15, "bold"),
                 text_color=T.TEXT,
             ).pack()
             ctk.CTkLabel(
                 empty,
-                text="استخدم المسح من السكنر أو رفع الملفات للبدء",
+                text="استخدم المسح المستمر أو رفع الملفات للبدء",
                 font=T.font(12),
                 text_color=T.TEXT_MUTED,
             ).pack(pady=(4, 0))
             return
 
+        # شبكة بطاقات مستندات أوضح
+        grid = ctk.CTkFrame(self.files_scroll, fg_color="transparent")
+        grid.pack(fill="both", expand=True, padx=4, pady=4)
+
+        columns = 2
         for index, item in enumerate(self.files):
+            row = index // columns
+            col = index % columns
+
             card = ctk.CTkFrame(
-                self.files_scroll,
+                grid,
                 fg_color=T.SURFACE,
-                corner_radius=14,
+                corner_radius=16,
                 border_width=1,
                 border_color=T.BORDER,
             )
-            card.pack(fill="x", pady=6, padx=4)
+            card.grid(row=row, column=col, sticky="nsew", padx=8, pady=8)
+            grid.grid_columnconfigure(col, weight=1)
 
-            left = ctk.CTkFrame(card, fg_color="transparent")
-            left.pack(side="left", padx=10, pady=10)
+            # رأس البطاقة: رقم الصفحة
+            header = ctk.CTkFrame(card, fg_color=T.PRIMARY_SOFT, corner_radius=12)
+            header.pack(fill="x", padx=10, pady=(10, 6))
+            ctk.CTkLabel(
+                header,
+                text=f"صفحة / مستند {index + 1}",
+                font=T.font(13, "bold"),
+                text_color=T.PRIMARY,
+                anchor="e",
+            ).pack(side="right", padx=10, pady=8)
             DangerButton(
-                left, "إزالة", command=lambda i=index: self._remove_file(i), width=80
-            ).pack()
+                header, "إزالة", command=lambda i=index: self._remove_file(i), width=70
+            ).pack(side="left", padx=8, pady=6)
 
-            meta = ctk.CTkFrame(card, fg_color="transparent")
-            meta.pack(side="right", fill="x", expand=True, padx=10, pady=10)
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+            # معاينة المستند الكبيرة
+            preview_box = ctk.CTkFrame(
+                body,
+                fg_color="#E8EEF2",
+                corner_radius=12,
+                border_width=1,
+                border_color=T.BORDER,
+                width=190,
+                height=260,
+            )
+            preview_box.pack(side="right", padx=(8, 0), pady=4)
+            preview_box.pack_propagate(False)
+
+            if item.is_image:
+                try:
+                    thumb = make_document_thumbnail(item.data, width=168, height=230)
+                    photo = ImageTk.PhotoImage(thumb)
+                    item.preview = photo
+                    preview_label = ctk.CTkLabel(
+                        preview_box, text="", image=photo, cursor="hand2"
+                    )
+                    preview_label.place(relx=0.5, rely=0.5, anchor="center")
+                    preview_label.bind(
+                        "<Button-1>",
+                        lambda _e, i=index: self._open_document_preview(i),
+                    )
+                    ctk.CTkLabel(
+                        preview_box,
+                        text="اضغط للتكبير",
+                        font=T.font(10),
+                        text_color=T.TEXT_MUTED,
+                    ).place(relx=0.5, rely=0.96, anchor="s")
+                except Exception:
+                    ctk.CTkLabel(
+                        preview_box,
+                        text="تعذر عرض\nالمستند",
+                        font=T.font(12),
+                        text_color=T.TEXT_MUTED,
+                    ).place(relx=0.5, rely=0.5, anchor="center")
+            else:
+                ctk.CTkLabel(
+                    preview_box,
+                    text="PDF\nمستند",
+                    font=T.font(16, "bold"),
+                    text_color=T.DANGER,
+                ).place(relx=0.5, rely=0.5, anchor="center")
+
+            # حقول البيانات
+            meta = ctk.CTkFrame(body, fg_color="transparent")
+            meta.pack(side="right", fill="both", expand=True, padx=(0, 8))
+
+            ctk.CTkLabel(
+                meta,
+                text="معاينة المستند الممسوح",
+                font=T.font(11),
+                text_color=T.TEXT_MUTED,
+                anchor="e",
+            ).pack(fill="x", pady=(4, 8))
+
+            ctk.CTkLabel(
+                meta,
+                text="نوع الكتاب",
+                font=T.font(11, "bold"),
+                text_color=T.TEXT_MUTED,
+                anchor="e",
+            ).pack(fill="x")
             type_entry = ctk.CTkEntry(
                 meta,
-                placeholder_text="نوع الكتاب",
+                placeholder_text="مثال: كتاب تحويل / تقرير",
                 justify="right",
-                height=36,
+                height=38,
                 corner_radius=10,
                 border_color=T.BORDER,
             )
-            type_entry.pack(fill="x", pady=2)
+            type_entry.pack(fill="x", pady=(2, 10))
             type_entry.insert(0, item.book_type)
+
+            ctk.CTkLabel(
+                meta,
+                text="العدد",
+                font=T.font(11, "bold"),
+                text_color=T.TEXT_MUTED,
+                anchor="e",
+            ).pack(fill="x")
             number_entry = ctk.CTkEntry(
                 meta,
-                placeholder_text="العدد",
+                placeholder_text="رقم الكتاب / العدد",
                 justify="right",
-                height=36,
+                height=38,
                 corner_radius=10,
                 border_color=T.BORDER,
             )
-            number_entry.pack(fill="x", pady=2)
+            number_entry.pack(fill="x", pady=(2, 10))
             number_entry.insert(0, item.book_number)
+
+            GhostButton(
+                meta,
+                "عرض المستند بحجم كبير",
+                command=lambda i=index: self._open_document_preview(i),
+                width=180,
+            ).pack(anchor="e", pady=(4, 0))
+
+            ctk.CTkLabel(
+                meta,
+                text=item.file_name,
+                font=T.font(10),
+                text_color=T.TEXT_MUTED,
+                anchor="e",
+            ).pack(fill="x", pady=(8, 0))
 
             def bind_type(event, i=index, entry=type_entry):
                 self.files[i].book_type = entry.get().strip()
@@ -467,42 +635,48 @@ class ArchiveAddFrame(ctk.CTkFrame):
             number_entry.bind("<KeyRelease>", bind_number)
             type_entry.bind("<FocusOut>", bind_type)
             number_entry.bind("<FocusOut>", bind_number)
+            item.type_entry = type_entry
+            item.number_entry = number_entry
 
-            ctk.CTkLabel(
-                meta,
-                text=item.file_name,
-                font=T.font(11),
-                text_color=T.TEXT_MUTED,
-                anchor="e",
-            ).pack(fill="x", pady=(4, 0))
-
-            if item.is_image:
-                try:
-                    img = Image.open(BytesIO(item.data))
-                    img.thumbnail((110, 110), Image.Resampling.LANCZOS)
-                    photo = ImageTk.PhotoImage(img)
-                    item.preview = photo
-                    ctk.CTkLabel(card, text="", image=photo).pack(
-                        side="right", padx=10, pady=10
-                    )
-                except Exception:
-                    ctk.CTkLabel(card, text="صورة", text_color=T.TEXT_MUTED).pack(
-                        side="right", padx=10
-                    )
-            else:
-                ctk.CTkLabel(
-                    card,
-                    text=" PDF ",
-                    font=T.font(13, "bold"),
-                    text_color=T.DANGER,
-                    fg_color="#FCEBEA",
-                    corner_radius=8,
-                ).pack(side="right", padx=10, pady=10)
+    def _open_document_preview(self, index: int) -> None:
+        if index < 0 or index >= len(self.files):
+            return
+        item = self.files[index]
+        if not item.is_image:
+            show_info("PDF", "معاينة التكبير متاحة لصور المستندات الممسوحة.")
+            return
+        ImagePreviewDialog(
+            self,
+            title=f"مستند {index + 1} — {item.file_name}",
+            image_path_or_bytes=item.data,
+            is_bytes=True,
+        )
 
     def _remove_file(self, index: int) -> None:
         if 0 <= index < len(self.files):
             self.files.pop(index)
             self._render_files()
+
+    def _focus_save_area(self) -> None:
+        """تمييز زر الحفظ/الإرسال بعد اكتمال المسح أو الرفع."""
+        try:
+            self.save_btn.configure(fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER)
+            self.send_btn.configure(fg_color=T.PRIMARY, hover_color=T.PRIMARY_HOVER)
+            self.save_btn.focus_set()
+            self.after(
+                2500,
+                lambda: self.save_btn.configure(
+                    fg_color=T.PRIMARY, hover_color=T.PRIMARY_HOVER
+                ),
+            )
+            self.after(
+                2500,
+                lambda: self.send_btn.configure(
+                    fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER
+                ),
+            )
+        except Exception:
+            pass
 
     def _save(self) -> None:
         self.error_label.configure(text="")
@@ -548,7 +722,7 @@ class ArchiveAddFrame(ctk.CTkFrame):
             for f in self.files
         ]
 
-        self._set_busy(True, "جاري الحفظ...")
+        self._set_busy(True, "جاري الإرسال...")
 
         def worker():
             try:
@@ -564,35 +738,35 @@ class ArchiveAddFrame(ctk.CTkFrame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _sync_meta_from_ui(self) -> None:
-        children = self.files_scroll.winfo_children()
-        for index, card in enumerate(children):
-            if index >= len(self.files):
-                break
-            for frame in card.winfo_children():
-                if not isinstance(frame, ctk.CTkFrame):
-                    continue
-                entry_widgets = [
-                    w for w in frame.winfo_children() if isinstance(w, ctk.CTkEntry)
-                ]
-                if len(entry_widgets) >= 2:
-                    self.files[index].book_type = entry_widgets[0].get().strip()
-                    self.files[index].book_number = entry_widgets[1].get().strip()
+        for item in self.files:
+            try:
+                if item.type_entry is not None:
+                    item.book_type = item.type_entry.get().strip()
+                if item.number_entry is not None:
+                    item.book_number = item.number_entry.get().strip()
+            except Exception:
+                continue
 
     def _after_save(self, result, error: Optional[str]) -> None:
         self._set_busy(False)
         if error:
             self.error_label.configure(text=error)
-            show_error("فشل الحفظ", error)
+            show_error("فشل الإرسال", error)
             return
         if isinstance(result, dict) and result.get("error") is True:
             message = str(result.get("message") or "فشل رفع الملف")
             self.error_label.configure(text=message)
-            show_error("فشل الحفظ", message)
+            show_error("فشل الإرسال", message)
             return
 
         message = ""
         if isinstance(result, dict):
             message = str(result.get("message") or "")
+        count = len(self.files)
         self.files.clear()
         self._render_files()
-        show_info("تم الحفظ", message or "تم رفع الأرشيف بنجاح")
+        show_info(
+            "تم الحفظ والإرسال",
+            message
+            or f"تم إرسال {count} مستند إلى الأرشيف بنجاح.\nالعملية مكتملة.",
+        )
