@@ -4,13 +4,56 @@ from __future__ import annotations
 
 import io
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from PIL import Image
 
 from app.scanner.models import ScannerDevice, ScannerError, ScannedImage
+
+
+@contextmanager
+def _com_initialized() -> Iterator[None]:
+    """تهيئة COM في الخيط الحالي — ضروري لمسح WIA من Thread خلفية."""
+    try:
+        import pythoncom  # type: ignore
+    except ImportError as exc:
+        raise ScannerError(
+            "مكتبة pywin32 غير مكتملة. من واجهة التنصيب اضغط «تنصيب المتطلبات»."
+        ) from exc
+
+    # WIA يعمل بشكل أفضل في وضع الشقة (STA)
+    should_uninit = False
+    try:
+        try:
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+            should_uninit = True
+        except Exception as exc:
+            # -2147417850 = RPC_E_CHANGED_MODE (مهيأ مسبقاً بوضع آخر)
+            hr = getattr(exc, "hresult", None)
+            if hr in (-2147417850, -2147221008):
+                # -2147221008 قد يظهر قبل التهيئة؛ أعد المحاولة ببساطة
+                try:
+                    pythoncom.CoInitialize()
+                    should_uninit = True
+                except Exception:
+                    # إن كان مهيأ مسبقاً نكمل بدون Uninitialize
+                    should_uninit = False
+            else:
+                try:
+                    pythoncom.CoInitialize()
+                    should_uninit = True
+                except Exception:
+                    should_uninit = False
+        yield
+    finally:
+        if should_uninit:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 WIA_DEVICE_SCANNER = 1
 WIA_INTENT_COLOR = 1
@@ -52,27 +95,28 @@ def _dispatch(prog_id: str):
 
 
 def list_wia_devices() -> List[ScannerDevice]:
-    manager = _dispatch("WIA.DeviceManager")
-    devices: List[ScannerDevice] = []
-    count = int(manager.DeviceInfos.Count)
-    for index in range(1, count + 1):
-        info = manager.DeviceInfos(index)
-        try:
-            if int(info.Type) != WIA_DEVICE_SCANNER:
+    with _com_initialized():
+        manager = _dispatch("WIA.DeviceManager")
+        devices: List[ScannerDevice] = []
+        count = int(manager.DeviceInfos.Count)
+        for index in range(1, count + 1):
+            info = manager.DeviceInfos(index)
+            try:
+                if int(info.Type) != WIA_DEVICE_SCANNER:
+                    continue
+            except Exception:
                 continue
-        except Exception:
-            continue
-        name = _prop(info, "Name") or f"Scanner-{index}"
-        manufacturer = _prop(info, "Manufacturer") or "WIA"
-        devices.append(
-            ScannerDevice(
-                name=f"[WIA] {name}",
-                product_family=str(manufacturer),
-                backend="wia",
+            name = _prop(info, "Name") or f"Scanner-{index}"
+            manufacturer = _prop(info, "Manufacturer") or "WIA"
+            devices.append(
+                ScannerDevice(
+                    name=f"[WIA] {name}",
+                    product_family=str(manufacturer),
+                    backend="wia",
+                )
             )
-        )
-    devices.sort(key=lambda d: d.name.lower())
-    return devices
+        devices.sort(key=lambda d: d.name.lower())
+        return devices
 
 
 def scan_wia(
@@ -86,26 +130,27 @@ def scan_wia(
     - use_feeder=True: يسحب كل الأوراق من ADF حتى نفاد الدرج
     - use_feeder=False: صفحة واحدة (اللوح الزجاجي أو ورقة واحدة)
     """
-    info = _resolve_device_info(device_name)
-    device = info.Connect()
-    if int(device.Items.Count) < 1:
-        raise ScannerError("السكنر لا يوفّر عنصر مسح عبر WIA.")
+    with _com_initialized():
+        info = _resolve_device_info(device_name)
+        device = info.Connect()
+        if int(device.Items.Count) < 1:
+            raise ScannerError("السكنر لا يوفّر عنصر مسح عبر WIA.")
 
-    _configure_document_handling(device, use_feeder=use_feeder)
-    item = device.Items[1]
-    _set_item_dpi(item, dpi)
+        _configure_document_handling(device, use_feeder=use_feeder)
+        item = device.Items[1]
+        _set_item_dpi(item, dpi)
 
-    if use_feeder:
-        images = _scan_feeder_continuous(device, item, dpi=dpi, show_ui=show_ui)
-    else:
-        images = _scan_single_page(device, item, dpi=dpi, show_ui=show_ui)
+        if use_feeder:
+            images = _scan_feeder_continuous(device, item, dpi=dpi, show_ui=show_ui)
+        else:
+            images = _scan_single_page(device, item, dpi=dpi, show_ui=show_ui)
 
-    if not images:
-        raise ScannerError(
-            "لم يتم استلام أي صورة.\n"
-            "ضع الأوراق في وحدة التغذية (ADF) وتأكد أن خيار «التغذية ADF» مفعّل."
-        )
-    return images
+        if not images:
+            raise ScannerError(
+                "لم يتم استلام أي صورة.\n"
+                "ضع الأوراق في وحدة التغذية (ADF) وتأكد أن خيار «التغذية ADF» مفعّل."
+            )
+        return images
 
 
 def _resolve_device_info(device_name: Optional[str]):

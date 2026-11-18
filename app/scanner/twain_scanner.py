@@ -32,9 +32,10 @@ __all__ = [
 ROOT = Path(__file__).resolve().parents[2]
 NATIVE_DIR = ROOT / "app" / "scanner" / "native"
 DSM_URLS = (
-    "https://github.com/twain/twain-dsm/releases/download/v2.5.1/twaindsm_2.5.1.win.bin.zip",
-    "https://github.com/twain/twain-dsm/releases/download/v2.5.0/twaindsm_2.5.0.win.bin.zip",
-    "https://github.com/twain/twain-dsm/releases/download/v2.4.2/twaindsm_2.4.2.win.bin.zip",
+    # الاسم الصحيح من إصدارات GitHub الرسمية
+    "https://github.com/twain/twain-dsm/releases/download/v2.5.1/dsm_020501.zip",
+    "https://github.com/twain/twain-dsm/releases/download/v2.5.0/dsm_020500.zip",
+    "https://github.com/twain/twain-dsm/releases/download/v2.4.2/dsm_020402.zip",
 )
 
 
@@ -73,12 +74,14 @@ def list_devices() -> List[ScannerDevice]:
     except Exception as exc:
         errors.append(f"WIA: {exc}")
 
-    # 2) TWAIN — إن توفّر DSM
+    # 2) TWAIN — اختياري؛ الفشل لا يمنع WIA
     try:
         ensure_twain_dsm()
         devices.extend(_list_twain_devices())
     except Exception as exc:
-        errors.append(f"TWAIN: {exc}")
+        # لا نُظهر فشل تحميل DSM إن وُجدت أجهزة WIA
+        if not devices:
+            errors.append(f"TWAIN: {exc}")
 
     # إزالة التكرار بالاسم
     unique: dict[str, ScannerDevice] = {}
@@ -166,13 +169,27 @@ def ensure_twain_dsm() -> Path:
     dll_path = NATIVE_DIR / "TWAINDSM.dll"
     alt = NATIVE_DIR / "twaindsm.dll"
 
+    # ابحث أولاً في مسارات ويندوز الشائعة
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    for extra in (
+        windir / "System32",
+        windir / "SysWOW64",
+        windir,
+        NATIVE_DIR,
+    ):
+        for name in ("TWAINDSM.dll", "twaindsm.dll"):
+            candidate = extra / name
+            if candidate.exists():
+                _add_dll_dir(extra)
+                _add_dll_dir(NATIVE_DIR)
+                return candidate
+
     if not dll_path.exists() and alt.exists():
         dll_path = alt
 
     if not dll_path.exists():
         _download_twain_dsm(dll_path)
 
-    # أسماء يبحث عنها pytwain أحياناً بحروف صغيرة
     lower = NATIVE_DIR / "twaindsm.dll"
     if dll_path.exists() and not lower.exists():
         try:
@@ -181,14 +198,6 @@ def ensure_twain_dsm() -> Path:
             pass
 
     _add_dll_dir(NATIVE_DIR)
-    # مسارات ويندوز الشائعة أيضاً
-    for extra in (
-        Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32",
-        Path(os.environ.get("WINDIR", r"C:\Windows")),
-    ):
-        if (extra / "TWAINDSM.dll").exists() or (extra / "twaindsm.dll").exists():
-            _add_dll_dir(extra)
-
     return dll_path
 
 
@@ -211,16 +220,29 @@ def _download_twain_dsm(target_dll: Path) -> None:
             )
 
         with zipfile.ZipFile(archive, "r") as zf:
-            members = [m for m in zf.namelist() if m.lower().endswith("twaindsm.dll")]
+            members = [
+                m
+                for m in zf.namelist()
+                if m.lower().endswith("twaindsm.dll") and not m.endswith("/")
+            ]
             if not members:
                 raise ScannerError("حزمة TWAINDSM لا تحتوي على المكتبة.")
+
+            # فضّل 64-bit لتطبيقات python 64
             member = None
             for name in members:
-                lower = name.lower()
-                if "64" in lower or "x64" in lower or "amd64" in lower:
+                lower = name.replace("\\", "/").lower()
+                if any(token in lower for token in ("/64/", "x64", "amd64", "64bit", "64-bit")):
                     member = name
                     break
-            member = member or members[0]
+            if member is None:
+                # بعض الحزم تضع النسخ في مجلدات مثل bin/Release64
+                for name in members:
+                    lower = name.replace("\\", "/").lower()
+                    if "32" not in Path(lower).parts and "x86" not in lower:
+                        member = name
+                        break
+            member = member or members[-1]
             target_dll.write_bytes(zf.read(member))
     except ScannerError:
         raise
